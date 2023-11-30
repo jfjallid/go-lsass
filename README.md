@@ -1,4 +1,4 @@
-# go-ShareEnum
+# go-lsass
 
 ## Description
 Package go-lsass is a tool built to dump the memory of the LSASS process
