@@ -4,8 +4,8 @@
 Package go-lsass is a tool built to dump the memory of the LSASS process
 remotely by uploading a local LSASS dumper, executing it as a service and then
 retrieve the dump file using SMB. It is built on top of the library
-https://github.com/jfjallid/go-smb and is designed to primarily work with the
-LSASS dumper https://github.com/jfjallid/processdumper.
+[go-smb](https://github.com/jfjallid/go-smb) and is designed to primarily work with the
+[LSASS dumper](https://github.com/jfjallid/processdumper).
 
 **NOTE** that the LSASS dumper utility is not included in this repo but has to be
 downloaded, compiled and then included by the --dumper flag or placed in the
@@ -23,10 +23,17 @@ options:
   -d, --domain              Domain name to use for login
   -u, --user                Username
   -p, --pass                Password
+  -n, --no-pass             Disable password prompt and send no credentials
       --hash                Hex encoded NT Hash for user password
       --local               Authenticate as a local user instead of domain user
-  -n, --null                Attempt null session authentication
   -t, --timeout             Dial timeout in seconds (default 5)
+      --relay               Start an SMB listener that will relay incoming
+                            NTLM authentications to the remote server and
+                            use that connection. NOTE that this forces SMB 2.1
+                            without encryption.
+      --relay-port <port>   Listening port for relay (default 445)
+      --socks-host <target> Establish connection via a SOCKS5 proxy server
+      --socks-port <port>   SOCKS5 proxy port (default 1080)
       --cleanup             Perform a cleanup of service binary, service, and dumpfile
       --dumper <path>       Path to local lsass dump utility (default pdumpsvc.exe)
       --service <name>      Name of service that will be created to run the lsass dumper (default MiscSVC)

