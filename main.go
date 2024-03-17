@@ -40,7 +40,7 @@ import (
 )
 
 var log = golog.Get("")
-var release string = "0.2.0"
+var release string = "0.2.1"
 var bind *dcerpc.ServiceBind
 var session *smb.Connection
 
@@ -77,7 +77,7 @@ func installService(serviceName, exePath string, args []string) error {
 	}
 
 	// Create the service
-	err = bind.CreateService(serviceName, dcerpc.ServiceWin32OwnProcess, dcerpc.ServiceDemandStart, dcerpc.ServiceErrorIgnore, exePath, "LocalSystem", serviceName, false)
+	err = bind.CreateService(serviceName, dcerpc.ServiceWin32OwnProcess, dcerpc.ServiceDemandStart, dcerpc.ServiceErrorIgnore, exePath, "LocalSystem", "", serviceName, false)
 	if err != nil {
 		log.Errorln(err)
 		return err
@@ -424,13 +424,13 @@ func main() {
 	}
 	defer session.Close()
 
-	if session.IsSigningRequired.Load() {
+	if session.IsSigningRequired() {
 		log.Noticeln("[-] Signing is required")
 	} else {
 		log.Noticeln("[+] Signing is NOT required")
 	}
 
-	if session.IsAuthenticated {
+	if session.IsAuthenticated() {
 		log.Noticef("[+] Login successful as %s\n", session.GetAuthUsername())
 	} else {
 		log.Noticeln("[-] Login failed")
