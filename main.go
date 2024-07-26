@@ -36,11 +36,12 @@ import (
 
 	"github.com/jfjallid/go-smb/smb"
 	"github.com/jfjallid/go-smb/smb/dcerpc"
+	"github.com/jfjallid/go-smb/spnego"
 	"github.com/jfjallid/golog"
 )
 
 var log = golog.Get("")
-var release string = "0.2.1"
+var release string = "0.3.0"
 var bind *dcerpc.ServiceBind
 var session *smb.Connection
 
@@ -167,7 +168,7 @@ var helpMsg = `
     Usage: ` + os.Args[0] + ` [options]
 
     options:
-          --host                Hostname or ip address of remote server
+          --host                Hostname or ip address of remote server. Must be hostname when using Kerberos
       -P, --port                SMB Port (default 445)
       -d, --domain              Domain name to use for login
       -u, --user                Username
@@ -175,6 +176,10 @@ var helpMsg = `
       -n, --no-pass             Disable password prompt and send no credentials
           --hash                Hex encoded NT Hash for user password
           --local               Authenticate as a local user instead of domain user
+      -k, --kerberos            Use Kerberos authentication. (KRB5CCNAME will be checked on Linux)
+          --dc-ip               Optionally specify ip of KDC when using Kerberos authentication
+          --target-ip           Optionally specify ip of target when using Kerberos authentication
+          --aes-key             Use a hex encoded AES128/256 key for Kerberos authentication
       -t, --timeout             Dial timeout in seconds (default 5)
           --relay               Start an SMB listener that will relay incoming
                                 NTLM authentications to the remote server and
@@ -199,11 +204,11 @@ var helpMsg = `
 `
 
 func main() {
-	var host, username, password, hash, domain, serviceName, dumper, svcBinaryName, svcBinaryPath, dumpFileName, dumpDir, outFile, socksIP string
+	var host, username, password, hash, domain, serviceName, dumper, svcBinaryName, svcBinaryPath, dumpFileName, dumpDir, outFile, socksIP, targetIP, dcIP, aesKey string
 	var port, dialTimeout, socksPort, relayPort int
-	var debug, noEnc, forceSMB2, localUser, version, runCleanup, verbose, relay, noPass bool
+	var debug, noEnc, forceSMB2, localUser, version, runCleanup, verbose, relay, noPass, kerberos bool
 	var err error
-	var hashBytes []byte
+	var hashBytes, aesKeyBytes []byte
 
 	flag.Usage = func() {
 		fmt.Println(helpMsg)
@@ -243,12 +248,19 @@ func main() {
 	flag.IntVar(&socksPort, "socks-port", 1080, "")
 	flag.BoolVar(&noPass, "no-pass", false, "")
 	flag.BoolVar(&noPass, "n", false, "")
+	flag.BoolVar(&kerberos, "k", false, "")
+	flag.BoolVar(&kerberos, "kerberos", false, "")
+	flag.StringVar(&targetIP, "target-ip", "", "")
+	flag.StringVar(&dcIP, "dc-ip", "", "")
+	flag.StringVar(&aesKey, "aes-key", "", "")
 
 	flag.Parse()
 
 	if debug {
 		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		log.SetFlags(golog.LstdFlags | golog.Lshortfile)
@@ -256,12 +268,16 @@ func main() {
 	} else if verbose {
 		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		log.SetLogLevel(golog.LevelInfo)
 	} else {
 		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelNotice, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelNotice, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc", "dcerpc", golog.LevelNotice, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
 		golog.Set("github.com/jfjallid/go-smb/smb/dcerpc/msrrp", "msrrp", golog.LevelNotice, golog.LstdFlags, golog.DefaultOutput, golog.DefaultErrOutput)
 	}
@@ -278,10 +294,15 @@ func main() {
 		return
 	}
 
-	if host == "" {
-		log.Errorln("Must specify a hostname")
+	if host == "" && targetIP == "" {
+		log.Errorln("Must specify a hostname or ip")
 		flag.Usage()
 		return
+	}
+	if host != "" && targetIP == "" {
+		targetIP = host
+	} else if host == "" && targetIP != "" {
+		host = targetIP
 	}
 
 	if socksIP != "" && isFlagSet("timeout") {
@@ -356,11 +377,25 @@ func main() {
 		}
 	}
 
+	if aesKey != "" {
+		aesKeyBytes, err = hex.DecodeString(aesKey)
+		if err != nil {
+			fmt.Println("Failed to decode aesKey")
+			log.Errorln(err)
+			return
+		}
+		if len(aesKeyBytes) != 16 && len(aesKeyBytes) != 32 {
+			fmt.Println("Invalid keysize of AES Key")
+			return
+		}
+	}
+
 	if noPass {
 		password = ""
 		hashBytes = nil
+		aesKeyBytes = nil
 	} else {
-		if (password == "") && (hashBytes == nil) {
+		if (password == "") && (hashBytes == nil) && (aesKeyBytes == nil) {
 			fmt.Printf("Enter password: ")
 			passBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 			fmt.Println()
@@ -373,17 +408,30 @@ func main() {
 	}
 
 	options := smb.Options{
-		Host: host,
-		Port: port,
-		Initiator: &smb.NTLMInitiator{
+		Host:              targetIP,
+		Port:              port,
+		DisableEncryption: noEnc,
+		ForceSMB2:         forceSMB2,
+	}
+
+	if kerberos {
+		options.Initiator = &spnego.KRB5Initiator{
+			User:     username,
+			Password: password,
+			Domain:   domain,
+			Hash:     hashBytes,
+			AESKey:   aesKeyBytes,
+			SPN:      "cifs/" + host,
+			DCIP:     dcIP,
+		}
+	} else {
+		options.Initiator = &spnego.NTLMInitiator{
 			User:      username,
 			Password:  password,
 			Hash:      hashBytes,
 			Domain:    domain,
 			LocalUser: localUser,
-		},
-		DisableEncryption: noEnc,
-		ForceSMB2:         forceSMB2,
+		}
 	}
 
 	// Only if not using SOCKS
