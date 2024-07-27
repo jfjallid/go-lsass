@@ -42,7 +42,7 @@ import (
 )
 
 var log = golog.Get("")
-var release string = "0.3.1"
+var release string = "0.3.2"
 var bind *dcerpc.ServiceBind
 var session *smb.Connection
 
