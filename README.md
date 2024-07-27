@@ -46,6 +46,10 @@ options:
       --dumpfile            Name of lsass dump file written to disk (default misc.log)
       --dumpdir             Remote path on C: to temporarily store the lsass dump (default C:\windows\)
       --output              Path to where to store the lsass dump locally (default lsass.dmp)
+      --modify              Will modify the service if it already exists. EXPERIMENTAL (default false)
+      --restore             Restores a modified service config when using --cleanup flag EXPERIMENTAL (default false)
+      --backup-file         File to store previous service config in or restore from
+                            when modifying an existing service (default svc-backup.json)
       --noenc               Disable smb encryption
       --smb2                Force smb 2.1
       --debug               Enable debug logging
@@ -92,3 +96,12 @@ they are also required during cleanup:
 ```
 ./go-lsass --host server001 -d test.local --user testuser --pass secretPass123 --cleanup
 ```
+
+When using the `--modify` flag, if the service exists it will be overwritten and used for the dump.
+The service's config will be written to disk and later restored by the automatic cleanup.
+If manual cleanup is performed, use the `--restore` flag to replace the service config instead of
+deleting the service which is the default behavior.
+
+Also note that the replacement and restoration of a service's configuration is not a full restoration
+as go-smb currently does not support modification of the Dependencies, LoadOrderGroup, and TagId settings.
+So if those are in use by the modified service, their values might get lost.
