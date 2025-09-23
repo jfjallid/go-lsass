@@ -43,7 +43,7 @@ import (
 )
 
 var log = golog.Get("")
-var release string = "0.3.3"
+var release string = "0.3.4"
 var bind *msscmr.RPCCon
 var session *smb.Connection
 

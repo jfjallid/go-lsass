@@ -2,8 +2,6 @@ module github.com/jfjallid/go-lsass
 
 go 1.24
 
-toolchain go1.24.7
-
 require (
 	github.com/jfjallid/go-smb v0.6.6
 	github.com/jfjallid/golog v0.3.3
