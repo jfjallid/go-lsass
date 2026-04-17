@@ -522,13 +522,10 @@ func main() {
 		}
 	}
 
-	// Only if not using SOCKS
-	if socksIP == "" {
-		options.DialTimeout, err = time.ParseDuration(fmt.Sprintf("%ds", dialTimeout))
-		if err != nil {
-			log.Errorln(err)
-			return
-		}
+	options.DialTimeout, err = time.ParseDuration(fmt.Sprintf("%ds", dialTimeout))
+	if err != nil {
+		log.Errorln(err)
+		return
 	}
 
 	if socksIP != "" {
